@@ -1,4 +1,4 @@
-sudo: required
+dist: trusty
 
 addons:
   hosts:
@@ -6,11 +6,7 @@ addons:
 
 language: go
 
-services:
-  - docker
-
 go:
-  - 1.6.4
   - 1.7.5
   - 1.8
 
@@ -33,6 +29,8 @@ before_install:
   - go env # for debugging
 
 script:
+  - Xvfb :99 &
+  - export DISPLAY=:99
   # Retry building up to 3 times as documented here: https://docs.travis-ci.com/user/common-build-problems/#travis_retry
   - travis_retry .travis/script.sh
 

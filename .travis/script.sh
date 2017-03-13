@@ -2,6 +2,7 @@
 
 set -e
 
+
 go get -t ./...
 if [ ${TESTMODE} == "unit" ]; then
   ginkgo -r --cover --randomizeAllSpecs --randomizeSuites --trace --progress --skipPackage integrationtests --skipMeasurements

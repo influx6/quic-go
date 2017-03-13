@@ -1,9 +1,7 @@
 package integrationtests
 
 import (
-	"bytes"
 	"crypto/md5"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -11,23 +9,17 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"runtime"
 
 	"strconv"
-	"time"
 
 	"github.com/lucas-clemente/quic-go/h2quic"
-	"github.com/lucas-clemente/quic-go/protocol"
 	"github.com/lucas-clemente/quic-go/testdata"
-	"github.com/tebeka/selenium"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
-	"github.com/onsi/gomega/gbytes"
-	"github.com/onsi/gomega/gexec"
 
 	"testing"
 )
@@ -43,8 +35,6 @@ var (
 	port       string
 	uploadDir  string
 	clientPath string
-
-	docker *gexec.Session
 )
 
 func TestIntegration(t *testing.T) {
@@ -55,14 +45,11 @@ func TestIntegration(t *testing.T) {
 var _ = BeforeSuite(func() {
 	setupHTTPHandlers()
 	setupQuicServer()
-	setupSelenium()
 })
 
 var _ = AfterSuite(func() {
 	err := server.Close()
 	Expect(err).NotTo(HaveOccurred())
-
-	stopSelenium()
 }, 10)
 
 var _ = BeforeEach(func() {
@@ -87,8 +74,7 @@ var _ = AfterEach(func() {
 	}
 	os.RemoveAll(uploadDir)
 
-	// remove downloaded file in docker container
-	removeDownload("data")
+	removeDownloadData()
 })
 
 func setupHTTPHandlers() {
@@ -101,6 +87,14 @@ func setupHTTPHandlers() {
 	})
 
 	http.HandleFunc("/data", func(w http.ResponseWriter, r *http.Request) {
+		defer GinkgoRecover()
+		data := dataMan.GetData()
+		Expect(data).ToNot(HaveLen(0))
+		_, err := w.Write(data)
+		Expect(err).NotTo(HaveOccurred())
+	})
+
+	http.HandleFunc("/data/", func(w http.ResponseWriter, r *http.Request) {
 		defer GinkgoRecover()
 		data := dataMan.GetData()
 		Expect(data).ToNot(HaveLen(0))
@@ -178,137 +172,32 @@ func setupQuicServer() {
 	}()
 }
 
-func setupSelenium() {
-	var err error
-	pullCmd := exec.Command("docker", "pull", "lclemente/standalone-chrome:dev")
-	pull, err := gexec.Start(pullCmd, GinkgoWriter, GinkgoWriter)
-	Expect(err).NotTo(HaveOccurred())
-	// Assuming a download at 10 Mbit/s
-	Eventually(pull, 10*time.Minute).Should(gexec.Exit(0))
-
-	dockerCmd := exec.Command(
-		"docker",
-		"run",
-		"-i",
-		"--rm",
-		"-p=4444:4444",
-		"--name", "quic-test-selenium",
-		"lclemente/standalone-chrome:dev",
-	)
-	docker, err = gexec.Start(dockerCmd, GinkgoWriter, GinkgoWriter)
-	Expect(err).NotTo(HaveOccurred())
-	Eventually(docker.Out, 10).Should(gbytes.Say("Selenium Server is up and running"))
-}
-
-func stopSelenium() {
-	docker.Interrupt().Wait(10)
-}
-
-func getWebdriverForVersion(version protocol.VersionNumber) selenium.WebDriver {
-	caps := selenium.Capabilities{
-		"browserName": "chrome",
-		"chromeOptions": map[string]interface{}{
-			"args": []string{
-				"--enable-quic",
-				"--no-proxy-server",
-				"--origin-to-force-quic-on=quic.clemente.io:443",
-				fmt.Sprintf(`--host-resolver-rules=MAP quic.clemente.io:443 %s:%s`, GetLocalIP(), port),
-				fmt.Sprintf(`--quic-version=QUIC_VERSION_%d`, version),
-			},
-		},
-	}
-	wd, err := selenium.NewRemote(caps, "http://localhost:4444/wd/hub")
-	Expect(err).NotTo(HaveOccurred())
-	return wd
-}
-
-func GetLocalIP() string {
-	// First, try finding interface docker0
-	i, err := net.InterfaceByName("docker0")
-	if err == nil {
-		var addrs []net.Addr
-		addrs, err = i.Addrs()
-		Expect(err).NotTo(HaveOccurred())
-		return addrs[0].(*net.IPNet).IP.String()
-	}
-
-	addrs, err := net.InterfaceAddrs()
-	Expect(err).NotTo(HaveOccurred())
-	for _, address := range addrs {
-		if ipnet, ok := address.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
-			if ipnet.IP.To4() != nil {
-				return ipnet.IP.String()
-			}
-		}
-	}
-	panic("no addr")
-}
-
-func removeDownload(filename string) {
-	cmd := exec.Command("docker", "exec", "-i", "quic-test-selenium", "rm", "-f", "/home/seluser/Downloads/"+filename)
-	session, err := gexec.Start(cmd, GinkgoWriter, GinkgoWriter)
-	Expect(err).NotTo(HaveOccurred())
-	Eventually(session, 5).Should(gexec.Exit(0))
-}
-
-// getDownloadSize gets the file size of a file in the /home/seluser/Downloads folder in the docker container
+// getDownloadSize gets the file size of a file in the local download folder
 func getDownloadSize(filename string) int {
-	var out bytes.Buffer
-	cmd := exec.Command("docker", "exec", "-i", "quic-test-selenium", "stat", "--printf=%s", "/home/seluser/Downloads/"+filename)
-	session, err := gexec.Start(cmd, &out, GinkgoWriter)
-	Expect(err).NotTo(HaveOccurred())
-	Eventually(session, 5).Should(gexec.Exit())
-	if session.ExitCode() != 0 {
+	stat, err := os.Stat("/Users/lucas/Downloads/" + filename)
+	if err != nil {
 		return 0
 	}
-	Expect(out.Bytes()).ToNot(BeEmpty())
-	size, err := strconv.Atoi(string(out.Bytes()))
-	Expect(err).NotTo(HaveOccurred())
-	return size
+	return int(stat.Size())
 }
 
-// getFileSize gets the file size of a file on the local file system
-func getFileSize(filename string) int {
-	file, err := os.Open(filename)
-	Expect(err).ToNot(HaveOccurred())
-	fi, err := file.Stat()
-	Expect(err).ToNot(HaveOccurred())
-	return int(fi.Size())
-}
-
-// getDownloadMD5 gets the md5 sum file of a file in the /home/seluser/Downloads folder in the docker container
+// getDownloadMD5 gets the md5 sum file of a file in the local download folder
 func getDownloadMD5(filename string) []byte {
-	var out bytes.Buffer
-	cmd := exec.Command("docker", "exec", "-i", "quic-test-selenium", "md5sum", "/home/seluser/Downloads/"+filename)
-	session, err := gexec.Start(cmd, &out, GinkgoWriter)
-	Expect(err).NotTo(HaveOccurred())
-	Eventually(session, 5).Should(gexec.Exit())
-	if session.ExitCode() != 0 {
+	var result []byte
+	file, err := os.Open("/Users/lucas/Downloads/" + filename)
+	if err != nil {
 		return nil
 	}
-	Expect(out.Bytes()).ToNot(BeEmpty())
-	res, err := hex.DecodeString(string(out.Bytes()[0:32]))
-	Expect(err).NotTo(HaveOccurred())
-	return res
-}
-
-// getFileMD5 gets the md5 sum of a file on the local file system
-func getFileMD5(filepath string) []byte {
-	var result []byte
-	file, err := os.Open(filepath)
-	Expect(err).ToNot(HaveOccurred())
 	defer file.Close()
 
 	hash := md5.New()
 	_, err = io.Copy(hash, file)
-	Expect(err).ToNot(HaveOccurred())
+	if err != nil {
+		return nil
+	}
 	return hash.Sum(result)
 }
 
-// copyFileToDocker copies a file from the local file system into the /home/seluser/ directory in the docker container
-func copyFileToDocker(filepath string) {
-	cmd := exec.Command("docker", "cp", filepath, "quic-test-selenium:/home/seluser/")
-	session, err := gexec.Start(cmd, GinkgoWriter, GinkgoWriter)
-	Expect(err).NotTo(HaveOccurred())
-	Eventually(session, 5).Should(gexec.Exit(0))
+func removeDownloadData() {
+	// TODO(lclemente)
 }
